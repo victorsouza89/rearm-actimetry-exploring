@@ -8,6 +8,8 @@ Date : 05/07/2022
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.exceptions import NotFittedError
 from sklearn.metrics import accuracy_score
+import schemdraw
+import schemdraw.flow as flow
 from lib import ibelief
 import numpy as np
 import math
@@ -18,7 +20,7 @@ class EDT(BaseEstimator, ClassifierMixin):
     are imperfectly labeled.
     """
 
-    def __init__(self, min_samples_leaf = 1, criterion = "conflict", lbda = 0.5, rf_max_features = "None", max_depth = 100):
+    def __init__(self, min_samples_leaf = 1, criterion = "conflict", lbda = 0.5, rf_max_features = "None", max_depth = None, criterion_treshold = None):
         """
         EDT for Evidential Decision Tree is used to predict labels when input data
         are imperfectly labeled.
@@ -48,6 +50,7 @@ class EDT(BaseEstimator, ClassifierMixin):
         self.lbda = lbda
         self.rf_max_features = rf_max_features
         self.max_depth = max_depth
+        self.criterion_treshold = criterion_treshold
     
     def score(self, X, y_true, criterion=3):
         """
@@ -85,6 +88,55 @@ class EDT(BaseEstimator, ClassifierMixin):
             raise NotFittedError("The classifier has not been fitted yet")
 
         self.root_node.print_tree()
+
+    def plot_tree(self,
+                  feature_names=None,
+                  class_names=None,
+                  focal_colors=None,
+                  position=(0, 0),
+                  x_spacing=4,
+                  y_spacing=3,
+                  box_width=10,
+                  box_height=1.5,
+                  box_scale=1,
+                  box_reduction=0.75,
+                  x_scale=1,
+                  x_reduction=0.1,
+                  fontsize=12,
+                  arrow_label=None,
+                  add_legend=True):
+        
+        """
+        Plot the fitted tree using Schemdraw.
+
+        Parameters
+        -----
+        feature_names : list
+            List of feature names for each node.
+        class_names : list
+            List of class names for the output.
+        """
+
+        if not self._fitted:
+            raise NotFittedError("The classifier has not been fitted yet")
+
+        return self.root_node.plot_tree(
+            feature_names=feature_names,
+            class_names=class_names,
+            focal_colors=focal_colors,
+            position=position,
+            x_spacing=x_spacing,
+            y_spacing=y_spacing,
+            box_width=box_width,
+            box_height=box_height,
+            box_scale=box_scale,
+            box_reduction=box_reduction,
+            x_scale=x_scale,
+            x_reduction=x_reduction,
+            fontsize=fontsize,
+            arrow_label=arrow_label,
+            add_legend=add_legend
+        )
 
     def get_max_depth(self):
         """
@@ -266,13 +318,17 @@ class EDT(BaseEstimator, ClassifierMixin):
         # Find the best attribute et the treshold for continous values
         A, threshold = self._best_gain(indices)
 
-        if node_depth >= self.max_depth:
-            A = None
+        if self.max_depth is not None:
+            if node_depth >= self.max_depth:
+                A = None
+        root_node.criterion_value = self._compute_info(indices)
+        if self.criterion_treshold is not None:
+            if root_node.criterion_value < self.criterion_treshold:
+                A = None
 
         if A != None:  
             # Categorical values
             if threshold == None:
-
                 # For each attributes, create a node
                 for v in np.unique(self.X_trained[indices,A]):
                     index = np.where(self.X_trained[indices,A] == v)[0]
@@ -297,6 +353,10 @@ class EDT(BaseEstimator, ClassifierMixin):
             # Append a mass if the node is a leaf
             root_node.mass = ibelief.DST(self.y_trained[indices].T, 12).flatten()
             root_node.number_leaf = self.y_trained[indices].shape[0]
+        
+        root_node.node_mass = ibelief.DST(self.y_trained[indices].T, 12).flatten()
+        root_node.number_elements = self.y_trained[indices].shape[0]
+        root_node.criterion_type = self.criterion
 
     def _best_gain(self, indices):
         
@@ -571,6 +631,10 @@ class TreeNode():
         self.continuous_attribute = continuous_attribute
         self.number_leaf = number_leaf
         self.node_depth = node_depth
+        self.number_elements = 0
+        self.node_mass = None
+        self.criterion_value = None
+        self.criterion_type = None
     
     def max_depth(self, depth=1):
         maximum_depth = []
@@ -619,7 +683,139 @@ class TreeNode():
         
         if len(self.leafs) == 0:
             print('    ' * depth, "N:", self.number_leaf,", Mass : ", np.around(self.mass, decimals=2))
-    
+
+    def plot_tree(
+            self,
+            feature_names=None,
+            class_names=None,
+            focal_colors=None,
+            diagram=None,
+            parent=None,
+            position=(0, 0),
+            x_spacing=4,
+            y_spacing=2,
+            box_width=8,
+            box_height=1,
+            box_scale=1,
+            box_reduction=0.75,
+            x_scale=1,
+            x_reduction=0.1,
+            fontsize=12,
+            arrow_label=None,
+            add_legend=True):
+        """
+        Plots a decision tree using Schemdraw while managing overlaps, rescaling labels, and adding legends.
+
+        Parameters:
+        - feature_names (list[str], optional): List of feature names corresponding to attributes.
+        - class_names (list[str], optional): List of class names for the matrix M.
+        - diagram (schemdraw.Drawing, optional): Existing diagram to add nodes to. If None, a new diagram is created.
+        - parent (schemdraw.element.Element, optional): Parent node to connect the current node.
+        - position (tuple[float, float]): Position (x, y) of the current node in the diagram.
+        - x_spacing (float): Horizontal spacing between child nodes.
+        - y_spacing (float): Vertical spacing between levels.
+        - box_width (float): Width of the node boxes.
+        - box_height (float): Height of the node boxes.
+        - box_scale (float): Scaling factor for node boxes.
+        - box_reduction (float): Scaling reduction for child node boxes.
+        - x_scale (float): Scaling factor for horizontal spacing.
+        - x_reduction (float): Scaling reduction for child nodes.
+        - fontsize (float): Base font size for node labels.
+        - arrow_label (str, optional): Label for the arrow connecting to the current node.
+        - add_legend (bool): Whether to include a legend for the class names.
+
+        Returns:
+        - schemdraw.Drawing: The updated diagram object.
+        """
+        if diagram is None:
+            diagram = schemdraw.Drawing(unit=1)
+
+        # Generate node text
+        text = f"{self.number_elements} samples\n$M = {np.around(self.node_mass, decimals=2).tolist()}$\nImpurity ({self.criterion_type}): {np.around(self.criterion_value, decimals=2)}"
+
+        # Generate node color
+        if focal_colors is not None:
+            color = np.dot(self.node_mass.reshape(1, -1), focal_colors).clip(0, 1).flatten().tolist()
+        else:
+            color = 'white'
+
+        diagram += (node := flow.Box(
+            h=box_height * box_scale,
+            w=box_width * box_scale
+        ).fill(
+            color
+        ).at(position).anchor("center").label(
+            text,
+            fontsize = fontsize * box_scale
+        ))
+
+        # Draw arrow from parent
+        if parent is not None:
+            diagram += flow.Arrow().at(parent.S).to(node.N).label(
+                arrow_label,
+                fontsize=fontsize * box_scale / 1.5,
+                rotate=True,
+                loc="bottom",
+            )
+
+        # Determine child positions
+        num_children = len(self.leafs)
+        if num_children > 0:
+            total_width = (num_children - 1) * (x_spacing + box_width * box_scale) # Total width of child nodes
+            child_positions = [
+                (position[0] - total_width / 2 + i * (x_spacing + box_width * box_scale), position[1] - y_spacing)
+                for i in range(num_children)
+            ]
+
+        # Feature name accessor
+        feature_label = (lambda x: feature_names[x]) if feature_names else (lambda x: f"Feat{x}")
+
+        # Plot child nodes
+        for idx, child in enumerate(self.leafs):
+            # Generate arrow label
+            if child.continuous_attribute == 1:
+                arrow_label = f"{feature_label(child.attribute)} < {child.attribute_value:.2f}"
+            elif child.continuous_attribute == 2:
+                arrow_label = f"{feature_label(child.attribute)} ≥ {child.attribute_value:.2f}"
+            else:
+                arrow_label = f"{feature_label(child.attribute)} = {child.attribute_value:.2f}"
+
+            # Recursively plot child
+            diagram = child.plot_tree(
+                feature_names=feature_names,
+                class_names=class_names,
+                focal_colors=focal_colors,
+                diagram=diagram,
+                parent=node,
+                position=child_positions[idx],
+                x_spacing=x_spacing * x_reduction,
+                y_spacing=y_spacing,
+                box_width=box_width,
+                box_height=box_height,
+                box_scale=box_scale * box_reduction,
+                box_reduction=box_reduction,
+                x_scale=x_scale * x_reduction,
+                x_reduction=x_reduction,
+                fontsize=fontsize,
+                arrow_label=arrow_label,
+                add_legend=False  # Legend added only once
+            )
+
+        # Add legend for class names, if applicable
+        if add_legend and class_names:
+            legend_text = "$M = [$" + ", ".join(
+                class_names
+            ) + "$]$"
+            diagram += flow.Box(
+                h=box_height * box_scale,
+                w=box_width * box_scale
+            ).at((position[0], position[1] + box_height * box_scale)).anchor("center").label(
+                legend_text,
+                fontsize=fontsize * box_scale * box_reduction
+            ).linewidth(0)
+                
+        return diagram
+
     def add_leaf(self, node):
         """
         Add leaf to the node

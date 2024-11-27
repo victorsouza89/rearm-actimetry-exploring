@@ -20,7 +20,7 @@ class EDT(BaseEstimator, ClassifierMixin):
     are imperfectly labeled.
     """
 
-    def __init__(self, min_samples_leaf = 1, criterion = "conflict", lbda = 0.5, rf_max_features = "None", max_depth = None, criterion_treshold = None):
+    def __init__(self, min_samples_leaf = 1, criterion = "conflict", lbda = 0.5, rf_max_features = "None", max_depth = None, criterion_treshold = None, cautiousness_tolerance = 0):
         """
         EDT for Evidential Decision Tree is used to predict labels when input data
         are imperfectly labeled.
@@ -51,6 +51,8 @@ class EDT(BaseEstimator, ClassifierMixin):
         self.rf_max_features = rf_max_features
         self.max_depth = max_depth
         self.criterion_treshold = criterion_treshold
+        self.cautiousness_tolerance = cautiousness_tolerance
+        self.leafs = []
     
     def score(self, X, y_true, criterion=3):
         """
@@ -338,21 +340,41 @@ class EDT(BaseEstimator, ClassifierMixin):
 
             # Numerical values 
             else:
-                # Left node
-                index = indices[np.where(self.X_trained[indices, A].astype(float) < threshold)[0]]
-                node = TreeNode(attribute=A, attribute_value=threshold, continuous_attribute=1, node_depth=node_depth)
-                self._build_tree(index, node)
-                root_node.leafs.append(node) 
-                
-                # Right node
-                index = indices[np.where(self.X_trained[indices, A].astype(float) >= threshold)[0]]
-                node = TreeNode(attribute=A, attribute_value=threshold, continuous_attribute=2, node_depth=node_depth)
-                self._build_tree(index, node)
-                root_node.leafs.append(node) 
+                if type(threshold) is tuple:
+                    # Left node
+                    index = indices[np.where(self.X_trained[indices, A].astype(float) < threshold[0])[0]]
+                    node = TreeNode(attribute=A, attribute_value=threshold[0], continuous_attribute=1, node_depth=node_depth)
+                    self._build_tree(index, node)
+                    root_node.leafs.append(node) 
+                    
+                    # Central node
+                    index = indices[np.where((self.X_trained[indices, A].astype(float) >= threshold[0]) & (self.X_trained[indices, A].astype(float) < threshold[1]))[0]]
+                    node = TreeNode(attribute=A, attribute_value=threshold, continuous_attribute=3, node_depth=node_depth)
+                    self._build_tree(index, node)
+                    root_node.leafs.append(node) 
+
+                    # Right node
+                    index = indices[np.where(self.X_trained[indices, A].astype(float) >= threshold[1])[0]]
+                    node = TreeNode(attribute=A, attribute_value=threshold[1], continuous_attribute=2, node_depth=node_depth)
+                    self._build_tree(index, node)
+                    root_node.leafs.append(node)
+                else:    
+                    # Left node
+                    index = indices[np.where(self.X_trained[indices, A].astype(float) < threshold)[0]]
+                    node = TreeNode(attribute=A, attribute_value=threshold, continuous_attribute=1, node_depth=node_depth)
+                    self._build_tree(index, node)
+                    root_node.leafs.append(node) 
+                    
+                    # Right node
+                    index = indices[np.where(self.X_trained[indices, A].astype(float) >= threshold)[0]]
+                    node = TreeNode(attribute=A, attribute_value=threshold, continuous_attribute=2, node_depth=node_depth)
+                    self._build_tree(index, node)
+                    root_node.leafs.append(node) 
         else:
             # Append a mass if the node is a leaf
             root_node.mass = ibelief.DST(self.y_trained[indices].T, 12).flatten()
             root_node.number_leaf = self.y_trained[indices].shape[0]
+            self.leafs.append(root_node)
         
         root_node.node_mass = ibelief.DST(self.y_trained[indices].T, 12).flatten()
         root_node.number_elements = self.y_trained[indices].shape[0]
@@ -404,7 +426,7 @@ class EDT(BaseEstimator, ClassifierMixin):
             # Numerical values
             else:
                 # Find best split
-                threshold, sum = self._find_treshoold(indices, info_root, A)
+                threshold, sum = self._find_treshold(indices, info_root, A)
 
             thresholds.append(threshold)
 
@@ -529,7 +551,7 @@ class EDT(BaseEstimator, ClassifierMixin):
         return ((1 - lbda) * np.sum(n_mass)) + (lbda * np.sum(d_mass))
 
 
-    def _find_treshoold(self, indices, info_root, A):
+    def _find_treshold(self, indices, info_root, A):
         """
         Returns the best treshold for a split
 
@@ -569,7 +591,54 @@ class EDT(BaseEstimator, ClassifierMixin):
 
             infos[v] = info
 
-        return thresholds[np.argmin(infos)], infos[np.argmin(infos)]
+        if self.cautiousness_tolerance == 0:
+            return thresholds[np.argmin(infos)], infos[np.argmin(infos)]
+        
+        max_number_cautiousness_elements = int(self.cautiousness_tolerance * len(thresholds))
+
+        central_treshold_index = np.argmin(infos)
+        central_treshold = thresholds[central_treshold_index]
+
+        best_initial_treshold = central_treshold
+        best_final_treshold = central_treshold
+
+        min_info = infos[np.argmin(infos)]
+
+        for minimal_treshold_index in range(central_treshold_index - max_number_cautiousness_elements, central_treshold_index + max_number_cautiousness_elements):
+            for maximal_treshold_index in range(minimal_treshold_index + 1, central_treshold_index + max_number_cautiousness_elements):
+                if maximal_treshold_index - minimal_treshold_index > max_number_cautiousness_elements:
+                    break
+                if minimal_treshold_index < 0:
+                    continue
+                if maximal_treshold_index >= len(thresholds):
+                    break
+
+                # divide in 3 nodes
+                left_node = indices[np.where(self.X_trained[indices,A].astype(float) < thresholds[minimal_treshold_index])[0]]
+                info = (left_node.shape[0] / indices.shape[0]) * self._compute_info(left_node)
+
+                right_node = indices[np.where(self.X_trained[indices,A].astype(float) >= thresholds[maximal_treshold_index])[0]]
+                info += (right_node.shape[0] / indices.shape[0]) * self._compute_info(right_node)
+
+                central_node = indices[np.where((self.X_trained[indices,A].astype(float) >= thresholds[minimal_treshold_index]) & (self.X_trained[indices,A].astype(float) < thresholds[maximal_treshold_index]))[0]]
+                info += (central_node.shape[0] / indices.shape[0]) * self._compute_info(central_node)
+
+                # Min sample leaf
+                if (left_node.shape[0] < self.min_samples_leaf or right_node.shape[0] < self.min_samples_leaf or central_node.shape[0] < self.min_samples_leaf):
+                    info = info_root
+
+                if info < min_info:
+                    best_initial_treshold = thresholds[minimal_treshold_index]
+                    best_final_treshold = thresholds[maximal_treshold_index]
+                    min_info = info
+
+        if min_info == info_root:
+            return thresholds[np.argmin(infos)], infos[np.argmin(infos)]
+        return (best_initial_treshold, best_final_treshold), min_info
+
+        
+
+
 
     def _predict(self, X, root_node):
         """
@@ -590,12 +659,16 @@ class EDT(BaseEstimator, ClassifierMixin):
             return root_node.mass
 
         for v in root_node.leafs:
-            if v.continuous_attribute == 0 and X[v.attribute] == v.attribute_value:
-                return self._predict(X, v)
-            elif v.continuous_attribute == 1 and X[v.attribute].astype(float) < v.attribute_value:
-                return self._predict(X, v)
-            elif v.continuous_attribute == 2 and X[v.attribute].astype(float) >= v.attribute_value:
-                return self._predict(X, v)
+            if v.continuous_attribute == 3:
+                if X[v.attribute].astype(float) >= v.attribute_value[0] and X[v.attribute].astype(float) < v.attribute_value[1]:
+                    return self._predict(X, v)
+            else:
+                if v.continuous_attribute == 0 and X[v.attribute] == v.attribute_value:
+                    return self._predict(X, v)
+                elif v.continuous_attribute == 1 and X[v.attribute].astype(float) < v.attribute_value:
+                    return self._predict(X, v)
+                elif v.continuous_attribute == 2 and X[v.attribute].astype(float) >= v.attribute_value:
+                    return self._predict(X, v)
         
         print("Classification Error, Tree not complete.")
         return None
@@ -679,6 +752,8 @@ class TreeNode():
                 print('|', '---' * depth, "Attribut", i.attribute, "<", i.attribute_value)
             elif i.continuous_attribute == 2:
                 print('|', '---' * depth, "Attribut", i.attribute, ">=", i.attribute_value)
+            elif i.continuous_attribute == 3:
+                print('|', '---' * depth, "Attribut", i.attribute, "in [", i.attribute_value[0], ",", i.attribute_value[1], ")")
             i.print_tree(depth + 1)
         
         if len(self.leafs) == 0:
@@ -777,6 +852,8 @@ class TreeNode():
                 arrow_label = f"{feature_label(child.attribute)} < {child.attribute_value:.2f}"
             elif child.continuous_attribute == 2:
                 arrow_label = f"{feature_label(child.attribute)} ≥ {child.attribute_value:.2f}"
+            elif child.continuous_attribute == 3:
+                arrow_label = f"{feature_label(child.attribute)} ∈ [{child.attribute_value[0]:.2f}, {child.attribute_value[1]:.2f})"
             else:
                 arrow_label = f"{feature_label(child.attribute)} = {child.attribute_value:.2f}"
 
